@@ -1,0 +1,257 @@
+---
+title: "final report code - ML"
+author: "Avni"
+date: "2026-01-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+# preparation of data in ML format and making checks
+
+marker_genes <- unique(endo.markers$gene) 
+
+marker_genes <- marker_genes[marker_genes %in% rownames(endo)]
+
+expr_mat <- t(as.matrix(GetAssayData(endo, assay = "RNA", slot = "data")[marker_genes, ]))
+dim(expr_mat)
+
+labels <- as.factor(endo$seurat_clusters)
+ml_data <- data.frame(expr_mat)
+ml_data$cluster <- labels
+
+
+# create train-test sets 
+
+set.seed(42)
+trainIndex <- createDataPartition(ml_data$cluster, p = 0.7, list = FALSE)
+train_data <- ml_data[trainIndex, ]
+test_data  <- ml_data[-trainIndex, ]
+
+
+# train random forests
+
+set.seed(42)
+rf_model <- ranger(cluster ~ ., data = train_data, num.trees = 200, importance = "impurity", probability=TRUE)
+
+set.seed(42)
+rf_model_2000 <- ranger(cluster ~ ., data = train_data, num.trees = 2000, importance = "impurity", probability=TRUE)
+
+set.seed(42)
+rf_model_5000 <- ranger(cluster ~ ., data = train_data, num.trees = 5000, importance = "impurity", probability=TRUE)
+
+
+# test on train data - 2000 trees
+
+set.seed(42)
+train_preds_prob_2000 <- predict(rf_model_2000, data=train_data)$predictions
+train_preds_2000 <- colnames(train_preds_prob_2000)[max.col(train_preds_prob_2000)]
+train_preds_2000 <- factor(train_preds_2000, levels = levels(train_data$cluster))
+yardstick::accuracy_vec(train_data$cluster, train_preds_2000)
+
+
+# 5-fold validation - 200 trees
+
+set.seed(42)
+
+ctrl <- trainControl(method = "cv", number = 5, verboseIter = FALSE)
+
+rf_cv <- train(cluster ~ ., data = train_data, method = "ranger", trControl = ctrl, importance="impurity", num.trees = 200)
+
+rf_cv$results %>%
+  select(mtry, Accuracy)
+
+
+# test on test data 
+
+set.seed(42)
+rf_pred_test <- predict(rf_model, data=test_data)
+probs_200 <- rf_pred_test$predictions
+predicted_200 <- colnames(probs_200)[max.col(probs_200, ties.method = "first")]
+pred_labels_200 <- factor(predicted_200, levels=levels(test_data$cluster))
+results_200 <- tibble(
+  truth=test_data$cluster,
+  predicted=pred_labels_200
+)
+
+set.seed(42)
+rf_pred_test_2000 <- predict(rf_model_2000, data=test_data)
+probs_2000 <- rf_pred_test_2000$predictions
+predicted_2000 <- colnames(probs_2000)[max.col(probs_2000, ties.method = "first")]
+pred_labels_2000 <- factor(predicted_2000, levels=levels(test_data$cluster))
+results_2000 <- tibble(
+  truth=test_data$cluster,
+  predicted=pred_labels_2000
+)
+
+set.seed(42)
+rf_pred_test_5000 <- predict(rf_model_5000, data=test_data)
+probs_5000 <- rf_pred_test_5000$predictions
+predicted_5000 <- colnames(probs_5000)[max.col(probs_5000, ties.method = "first")]
+pred_labels_5000 <- factor(predicted_5000, levels=levels(test_data$cluster))
+results_5000 <- tibble(
+  truth=test_data$cluster,
+  predicted=pred_labels_5000
+)
+
+
+# result metrics and overall effect of number of trees
+
+multi_metrics <- metric_set(
+  yardstick::accuracy,
+  yardstick::precision,
+  yardstick::recall,
+  yardstick::f_meas,
+  yardstick::mcc
+)
+results_200 <- results_200 %>%
+  mutate(trees = "200")
+results_2000 <- results_2000 %>%
+  mutate(trees = "2000")
+results_5000 <- results_5000 %>%
+  mutate(trees = "5000")
+all_results <- bind_rows(
+  results_200,
+  results_2000,
+  results_5000
+)
+metrics_df <- all_results %>%
+  group_by(trees) %>%
+  multi_metrics(truth = truth, estimate = predicted)
+
+fig2_plot2 <- ggplot(metrics_df, aes(x = trees, y = .estimate, fill = .metric)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  theme_minimal() + theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1, size=9), axis.title.y = element_text(size=12), axis.text.y = element_text(size=9), axis.title.x = element_text(size=12), plot.title = element_text(size = 14, face = "bold", hjust = 0.5), axis.line = element_line(color = "black", size = 0.5)
+    ) +  theme(legend.key.size = unit(0.5, "cm"),
+        legend.text = element_text(size = 9),
+        legend.title = element_text(size = 10, face = "bold")) +
+  labs(
+    title = "Model Performance by Number of Trees",
+    x = "Number of Trees",
+    y = "Metric Value",
+    fill = "Metric"
+  ) +
+  theme(
+    axis.text.x = element_text(face = "bold")
+  ) +
+  scale_y_continuous(expand = c(0,0))
+
+
+# feature importance - 200 trees
+
+imp_200 <- data.frame(
+  feature = names(rf_model$variable.importance), importance = rf_model$variable.importance
+)
+
+imp_top20_200 <- imp %>%
+  arrange(desc(importance)) %>%
+  dplyr::slice(1:20)
+
+feat_imp_200 <- ggplot(imp_top20_200, aes(x=reorder(feature, importance), y=importance)) + 
+  geom_col(fill="steelblue", color="black", width=0.7) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Random Forest Feature Importance (200 trees)", subtitle = "Which features contribute most to classification?", x="Feature", y="Importance") + theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5), plot.subtitle = element_text(size=13, hjust=0.5), axis.text.x = element_text(angle = 45, hjust = 1, size=9), axis.title.y = element_text(size=12), axis.text.y = element_text(size=9), axis.title.x = element_text(size=12), panel.grid = element_blank(), axis.line = element_line(color = "black", size = 0.5)) +
+  scale_y_continuous(expand = c(0,0))
+
+
+# confusion matrices - 2000 trees
+
+cm_2000 <- confusionMatrix(results_2000$predicted, results_2000$truth)
+cm_2000 <- as.matrix(cm_2000)
+cm_2000_df <- as.data.frame(cm_2000)
+cm_2000_long <- cm_2000_df %>%
+  mutate(Predicted = rownames(cm_2000_df)) %>%
+  pivot_longer(
+    cols = -Predicted,
+    names_to = "Actual",
+    values_to = "Count"
+  )
+cluster_levels <- unique(cm_2000_long$Actual)
+cluster_levels <- cluster_levels[order(as.numeric(cluster_levels))]
+
+cm_2000_long <- cm_2000_long %>%
+  mutate(
+    Predicted = factor(Predicted, levels = cluster_levels),
+    Actual    = factor(Actual, levels = cluster_levels)
+  )
+
+fig2_plot1 <- ggplot(cm_2000_long, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "grey90") +
+  geom_text(aes(label = Count), size = 2.5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size=9), axis.title.y = element_text(size=12), axis.text.y = element_text(size=9), axis.title.x = element_text(size=12), plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+    ) +  theme(legend.key.size = unit(0.5, "cm"),
+        legend.text = element_text(size = 9),
+        legend.title = element_text(size = 10, face = "bold")) +
+  labs(
+    title = "Confusion Matrix (2000 trees)",
+    x = "Predicted cluster",
+    y = "Actual cluster"
+  )
+
+cm_2000_norm <- cm_2000_long %>%
+  group_by(Actual) %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  ungroup()
+
+ggplot(cm_2000_norm, aes(x = Predicted, y = Actual, fill = Proportion)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", Proportion)), size = 2.5) +
+  scale_fill_gradient(low = "white", high = "darkred") +
+  theme_minimal(base_size=11) +
+   theme(panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, size=9), axis.title.y = element_text(size=12), axis.text.y = element_text(size=9), axis.title.x = element_text(size=12), plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+    ) +  theme(legend.key.size = unit(0.5, "cm"),
+        legend.text = element_text(size = 9),
+        legend.title = element_text(size = 10, face = "bold")) +
+  labs(
+    title = "Normalized Confusion Matrix (by True Class)",
+    x = "Predicted cluster",
+    y = "Actual cluster"
+  )
+
+
+# feature importance - 2000 trees
+
+imp <- data.frame(
+  feature = names(rf_model_2000$variable.importance), importance = rf_model_2000$variable.importance
+)
+
+imp_top20 <- imp %>%
+  arrange(desc(importance)) %>%
+  dplyr:: slice(1:20)
+
+fig2_plot3 <- ggplot(imp_top20, aes(x=reorder(feature, importance), y=importance)) + 
+  geom_col(fill="steelblue", color="black", width=0.7) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Random Forest Feature Importance (2000 trees)", subtitle = "Which features contribute most to classification?", x="Feature", y="Importance") + theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5), plot.subtitle = element_text(size=13, hjust=0.5), axis.text.x = element_text(angle = 45, hjust = 1, size=9), axis.title.y = element_text(size=12), axis.text.y = element_text(size=9), axis.title.x = element_text(size=12), panel.grid = element_blank(), axis.line = element_line(color = "black", size = 0.5)) +
+  scale_y_continuous(expand = c(0,0))
+
+```

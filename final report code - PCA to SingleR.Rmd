@@ -1,0 +1,169 @@
+---
+title: "final report code - PCA to ML format"
+author: "Avni"
+date: "2025-12-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+# PCA
+endo<-RunPCA(endo,features=VariableFeatures(object=endo))
+
+ElbowPlot(endo) +  ggtitle("Elbow plot") +
+  theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5), axis.title.x=element_text(size=11), axis.title.y =element_text(size=11), axis.text.x = element_text(size=8), axis.text.y = element_text(size=8))
+
+
+# clustering 
+
+endo<-FindNeighbors(endo, dims=1:15)
+endo<-FindClusters(endo, resolution=0.5)
+
+
+# UMAP
+
+set.seed(123)
+endo<-RunUMAP(endo,dims=1:15)
+UMAP <- DimPlot(endo, reduction="umap", label=TRUE,  pt.size = 0.5) +
+  xlab("UMAP 1") +
+  ylab("UMAP 2") +
+  ggtitle("UMAP") +
+  theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5), axis.title.x=element_text(size=11), axis.title.y =element_text(size=11), axis.text.x = element_text(size=8), axis.text.y = element_text(size=8)) +  theme(legend.key.size = unit(0.4, "cm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9, face = "bold")) +
+  labs(colour="Cluster")
+
+
+# markers
+
+endo.markers<-FindAllMarkers(endo, logfc.threshold=0.25, test.use="roc", only.pos=FALSE)
+
+top3_markers <- endo.markers %>%
+   group_by(cluster) %>%
+   slice_head(n = 3) %>%
+  ungroup()
+
+dp_markers <- c("LGR5", "VWF", "PTPRC", "CDHR3", "PDGFRB", "F13A1", "TOP2A", "SUFU", "PLCL1", "SFRP4")
+
+# dotplot
+
+dp_markers <- intersect(dp_markers, rownames(endo))
+dot_plot <- DotPlot(endo, features = dp_markers) +
+  scale_size(range = c(2, 5)) + 
+  RotatedAxis() + 
+  ylab("Cluster") + xlab("Feature") + 
+  ggtitle("Biomarkers Dot plot") + 
+  theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5), axis.title.x=element_text(size=11), axis.title.y =element_text(size=11), axis.text.x = element_text(size=8), axis.text.y = element_text(size=8)) +
+  theme(legend.key.size = unit(0.4, "cm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9, face = "bold"))
+
+# heatmap
+
+umap_cols <- ggplot_build(UMAP)$data[[1]] %>%
+  dplyr::select(colour, group) %>%
+  distinct()
+
+cluster_cols <- setNames(
+  umap_cols$colour,
+  levels(Idents(endo))
+)
+
+heatmap_cluster_cols <- c("0"="#F8766D", "1"="#E18A00", "2"="#BE9C00", "5"="#00BE70", "4"="#24B700", "3"="#8CAB00", "6"="#00C1AB", "7-12"="#8B93FF")
+
+endo$cluster_original <- Idents(endo)
+
+endo$cluster_grouped <- as.character(endo$cluster_original)
+
+endo$cluster_grouped[endo$cluster_grouped %in% c("7","8","9","10","11","12")] <- "7-12"
+
+endo$cluster_grouped <- factor(
+  endo$cluster_grouped,
+  levels = c("0", "1", "2", "3", "4", "5", "6", "7-12")
+)
+
+Idents(endo) <- "cluster_grouped"
+
+endo <- subset(endo, cells = colnames(endo)[!is.na(Idents(endo))])
+
+Idents(endo) <- droplevels(Idents(endo))
+
+final_heatmap <- DoHeatmap(endo, features = unique(top3_markers$gene), group.colors=heatmap_cluster_cols) +
+  scale_x_discrete(position = "top") +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5), axis.text.y = element_text(size=7.5), axis.title.y = element_text(size=10), axis.title.x = element_text(size=10), axis.title.x.top = element_text(size=10)) +
+  ggtitle("Top 3 markers Heatmap") +
+  labs(x="Cluster", y="Feature") +
+  theme(
+    legend.key.size = unit(0.4, "cm"),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9, face = "bold")) +
+  guides(colour="none")
+
+Idents(endo) <- "cluster_original"
+
+
+# internal annotation
+
+hpca <- HumanPrimaryCellAtlasData()
+monaco <- MonacoImmuneData()
+
+pred_hpca <- SingleR(
+  test = GetAssayData(endo, slot = "data"),
+  ref = hpca,
+  labels = hpca$label.main
+)
+
+pred_mono <- SingleR(
+  test = GetAssayData(endo, slot = "data"),
+  ref = monaco,
+  labels = monaco$label.main
+)
+
+endo$SingleR_HPCA_cell <- pred_hpca$labels
+endo$SingleR_Monaco_cell <- pred_mono$labels
+
+endo$seurat_clusters <- as.character(endo$seurat_clusters)
+
+cluster_labels_hpca <- endo@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(
+    HPCA_label = names(which.max(table(SingleR_HPCA_cell)))
+  )
+
+endo$SingleR_HPCA <- cluster_labels_hpca$HPCA_label[
+  match(endo$seurat_clusters, cluster_labels_hpca$seurat_clusters)
+]
+
+cluster_labels_mono <- endo@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(
+    Monaco_label = names(which.max(table(SingleR_Monaco_cell)))
+  )
+
+endo$SingleR_Monaco <- cluster_labels_mono$Monaco_label[
+  match(endo$seurat_clusters, cluster_labels_mono$seurat_clusters)
+]
+```
